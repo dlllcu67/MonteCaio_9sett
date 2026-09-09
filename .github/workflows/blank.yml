@@ -1,0 +1,1009 @@
+name: Save Webcam Image MonteCaio
+
+on:
+  # Controllo ogni 5 minuti.
+  # Il controllo dei 28 minuti viene effettuato internamente.
+  # Evitiamo il minuto 00 per ridurre i possibili ritardi dello scheduler.
+  schedule:
+    - cron: "2/5 * * * *"
+      timezone: "Europe/Rome"
+
+  # Avvio manuale
+  workflow_dispatch:
+
+concurrency:
+  group: webcam-archive
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  webcam:
+    runs-on: ubuntu-latest
+
+    env:
+      TZ: Europe/Rome
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+      # Monte Caio - Schia - Tizzano Val Parma
+      LATITUDE: "44.4643"
+      LONGITUDE: "10.1607"
+
+      # Intervallo minimo tra due immagini archiviate
+      INTERVAL_MINUTES: "28"
+
+    steps:
+
+      # ============================================================
+      # 1. CHECKOUT
+      # ============================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+
+      # ============================================================
+      # 2. DIAGNOSTICA SCHEDULER
+      # ============================================================
+
+      - name: Diagnostica scheduler
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=========================================="
+          echo "DIAGNOSTICA GITHUB ACTIONS"
+          echo "=========================================="
+
+          echo ""
+          echo "Ora UTC:"
+          date -u "+%Y-%m-%d %H:%M:%S UTC"
+
+          echo ""
+          echo "Ora Europe/Rome:"
+          TZ=Europe/Rome date "+%Y-%m-%d %H:%M:%S %Z"
+
+          echo ""
+          echo "Tipo evento:"
+          echo "${{ github.event_name }}"
+
+          echo ""
+          echo "Schedule:"
+          echo "${{ github.event.schedule }}"
+
+          echo ""
+          echo "Run ID:"
+          echo "${{ github.run_id }}"
+
+          echo ""
+          echo "Repository:"
+          echo "${{ github.repository }}"
+
+          echo ""
+          echo "Branch:"
+          echo "${{ github.ref_name }}"
+
+          echo ""
+          echo "Commit:"
+          echo "${{ github.sha }}"
+
+          echo "=========================================="
+
+
+      # ============================================================
+      # 3. CALCOLO CREPUSCOLO CIVILE
+      # ============================================================
+
+      - name: Calcola finestra di acquisizione
+        id: sunlight
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          import os
+          import math
+          from datetime import datetime, timezone
+          from zoneinfo import ZoneInfo
+
+          latitude = float(os.environ["LATITUDE"])
+          longitude = float(os.environ["LONGITUDE"])
+
+          local_tz = ZoneInfo("Europe/Rome")
+          now = datetime.now(local_tz)
+
+
+          def solar_event(date, latitude, longitude, zenith, sunrise):
+
+              day_of_year = date.timetuple().tm_yday
+
+              longitude_hour = longitude / 15.0
+
+              if sunrise:
+                  approximate_time = (
+                      day_of_year
+                      + ((6.0 - longitude_hour) / 24.0)
+                  )
+              else:
+                  approximate_time = (
+                      day_of_year
+                      + ((18.0 - longitude_hour) / 24.0)
+                  )
+
+              mean_anomaly = (
+                  0.9856 * approximate_time
+              ) - 3.289
+
+              sun_longitude = (
+                  mean_anomaly
+                  + (
+                      1.916
+                      * math.sin(math.radians(mean_anomaly))
+                  )
+                  + (
+                      0.020
+                      * math.sin(
+                          math.radians(2 * mean_anomaly)
+                      )
+                  )
+                  + 282.634
+              )
+
+              sun_longitude %= 360.0
+
+              right_ascension = math.degrees(
+                  math.atan(
+                      0.91764
+                      * math.tan(
+                          math.radians(sun_longitude)
+                      )
+                  )
+              )
+
+              right_ascension %= 360.0
+
+              longitude_quadrant = (
+                  math.floor(sun_longitude / 90.0)
+                  * 90.0
+              )
+
+              ra_quadrant = (
+                  math.floor(right_ascension / 90.0)
+                  * 90.0
+              )
+
+              right_ascension += (
+                  longitude_quadrant
+                  - ra_quadrant
+              )
+
+              right_ascension /= 15.0
+
+              sin_declination = (
+                  0.39782
+                  * math.sin(
+                      math.radians(sun_longitude)
+                  )
+              )
+
+              cos_declination = math.cos(
+                  math.asin(sin_declination)
+              )
+
+              cos_hour_angle = (
+                  math.cos(math.radians(zenith))
+                  - (
+                      sin_declination
+                      * math.sin(math.radians(latitude))
+                  )
+              ) / (
+                  cos_declination
+                  * math.cos(math.radians(latitude))
+              )
+
+              if cos_hour_angle > 1.0:
+                  return None
+
+              if cos_hour_angle < -1.0:
+                  return None
+
+              if sunrise:
+                  hour_angle = (
+                      360.0
+                      - math.degrees(
+                          math.acos(cos_hour_angle)
+                      )
+                  )
+              else:
+                  hour_angle = math.degrees(
+                      math.acos(cos_hour_angle)
+                  )
+
+              hour_angle /= 15.0
+
+              local_mean_time = (
+                  hour_angle
+                  + right_ascension
+                  - (0.06571 * approximate_time)
+                  - 6.622
+              )
+
+              utc_hour = (
+                  local_mean_time
+                  - longitude_hour
+              ) % 24.0
+
+              hours = int(utc_hour)
+
+              minutes_float = (
+                  utc_hour - hours
+              ) * 60.0
+
+              minutes = int(minutes_float)
+
+              seconds = int(
+                  round(
+                      (minutes_float - minutes)
+                      * 60.0
+                  )
+              )
+
+              if seconds >= 60:
+                  seconds = 0
+                  minutes += 1
+
+              if minutes >= 60:
+                  minutes = 0
+                  hours += 1
+
+              hours %= 24
+
+              return datetime(
+                  date.year,
+                  date.month,
+                  date.day,
+                  hours,
+                  minutes,
+                  seconds,
+                  tzinfo=timezone.utc
+              )
+
+
+          # 96° = crepuscolo civile
+          CIVIL_ZENITH = 96.0
+
+
+          civil_dawn_utc = solar_event(
+              now.date(),
+              latitude,
+              longitude,
+              CIVIL_ZENITH,
+              True
+          )
+
+          civil_dusk_utc = solar_event(
+              now.date(),
+              latitude,
+              longitude,
+              CIVIL_ZENITH,
+              False
+          )
+
+
+          if (
+              civil_dawn_utc is None
+              or civil_dusk_utc is None
+          ):
+
+              print(
+                  "ERRORE: impossibile calcolare "
+                  "il crepuscolo civile."
+              )
+
+              with open(
+                  os.environ["GITHUB_OUTPUT"],
+                  "a"
+              ) as output:
+
+                  output.write("daylight=false\n")
+
+              raise SystemExit(0)
+
+
+          civil_dawn = civil_dawn_utc.astimezone(local_tz)
+          civil_dusk = civil_dusk_utc.astimezone(local_tz)
+
+
+          print("==========================================")
+          print("CONTROLLO CREPUSCOLO CIVILE")
+          print("==========================================")
+
+          print(
+              "Ora attuale:       "
+              + now.strftime(
+                  "%Y-%m-%d %H:%M:%S %Z"
+              )
+          )
+
+          print(
+              "Inizio crepuscolo: "
+              + civil_dawn.strftime("%H:%M:%S")
+          )
+
+          print(
+              "Fine crepuscolo:   "
+              + civil_dusk.strftime("%H:%M:%S")
+          )
+
+          print("==========================================")
+
+
+          if civil_dawn <= now <= civil_dusk:
+
+              print(
+                  "OK: finestra di acquisizione attiva."
+              )
+
+              with open(
+                  os.environ["GITHUB_OUTPUT"],
+                  "a"
+              ) as output:
+
+                  output.write("daylight=true\n")
+
+          else:
+
+              print(
+                  "NOTTE: fuori dalla finestra "
+                  "di acquisizione."
+              )
+
+              with open(
+                  os.environ["GITHUB_OUTPUT"],
+                  "a"
+              ) as output:
+
+                  output.write("daylight=false\n")
+
+          PY
+
+
+      # ============================================================
+      # 4. CONTROLLO INTERVALLO
+      # ============================================================
+
+      - name: Controlla intervallo ultima acquisizione
+        id: interval
+        if: steps.sunlight.outputs.daylight == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STATE_FILE="last_capture.txt"
+          INTERVAL_SECONDS=$((INTERVAL_MINUTES * 60))
+
+          echo "=========================================="
+          echo "CONTROLLO ULTIMA ACQUISIZIONE"
+          echo "=========================================="
+
+          echo "Intervallo minimo:"
+          echo "${INTERVAL_MINUTES} minuti"
+
+
+          # ========================================================
+          # NESSUN FILE DI STATO
+          # ========================================================
+
+          if [ ! -f "$STATE_FILE" ]; then
+
+            echo ""
+            echo "File $STATE_FILE non esiste."
+            echo "Prima acquisizione consentita."
+
+            echo "download=true" >> "$GITHUB_OUTPUT"
+
+            exit 0
+
+          fi
+
+
+          # ========================================================
+          # LETTURA TIMESTAMP
+          # ========================================================
+
+          LAST_CAPTURE=$(
+            tr -d '\r\n' < "$STATE_FILE"
+          )
+
+
+          if [ -z "$LAST_CAPTURE" ]; then
+
+            echo ""
+            echo "File di stato vuoto."
+            echo "Prima acquisizione consentita."
+
+            echo "download=true" >> "$GITHUB_OUTPUT"
+
+            exit 0
+
+          fi
+
+
+          echo ""
+          echo "Ultima acquisizione:"
+          echo "$LAST_CAPTURE"
+
+
+          # ========================================================
+          # CONVERSIONE TIMESTAMP
+          # ========================================================
+
+          if ! LAST_EPOCH=$(
+            date -d "$LAST_CAPTURE" +%s 2>/dev/null
+          ); then
+
+            echo ""
+            echo "Timestamp non valido."
+            echo "Nuova acquisizione consentita."
+
+            echo "download=true" >> "$GITHUB_OUTPUT"
+
+            exit 0
+
+          fi
+
+
+          # ========================================================
+          # ORA ATTUALE
+          # ========================================================
+
+          NOW_EPOCH=$(date +%s)
+
+          ELAPSED=$((NOW_EPOCH - LAST_EPOCH))
+
+
+          echo ""
+          echo "Epoch ultima acquisizione:"
+          echo "$LAST_EPOCH"
+
+          echo "Epoch attuale:"
+          echo "$NOW_EPOCH"
+
+          echo "Secondi trascorsi:"
+          echo "$ELAPSED"
+
+          echo "Secondi richiesti:"
+          echo "$INTERVAL_SECONDS"
+
+
+          # ========================================================
+          # CONTROLLO INTERVALLO
+          # ========================================================
+
+          if [ "$ELAPSED" -lt "$INTERVAL_SECONDS" ]; then
+
+            REMAINING=$((INTERVAL_SECONDS - ELAPSED))
+            REMAINING_MIN=$((REMAINING / 60))
+
+            echo ""
+            echo "=========================================="
+            echo "TROPPO PRESTO"
+            echo "=========================================="
+
+            echo "Mancano circa:"
+            echo "${REMAINING_MIN} minuti."
+
+            echo "Nessuna acquisizione."
+
+            echo "download=false" >> "$GITHUB_OUTPUT"
+
+            exit 0
+
+          fi
+
+
+          echo ""
+          echo "=========================================="
+          echo "INTERVALLO OK"
+          echo "=========================================="
+
+          echo "Sono trascorsi almeno"
+          echo "${INTERVAL_MINUTES} minuti."
+
+          echo "Nuova acquisizione consentita."
+
+          echo "download=true" >> "$GITHUB_OUTPUT"
+
+
+      # ============================================================
+      # 5. SCARICA WEBCAM
+      # ============================================================
+
+      - name: Scarica immagine webcam
+        if: >
+          steps.sunlight.outputs.daylight == 'true' &&
+          steps.interval.outputs.download == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p webcam
+
+
+          TS=$(date +"%Y-%m-%d_%H-%M-%S")
+
+          IMG_URL="https://www.deltaeparapendio.it/utilities/img.php?img=1"
+
+          IMG_PATH="webcam/webcam_${TS}.jpg"
+
+
+          echo "=========================================="
+          echo "DOWNLOAD WEBCAM"
+          echo "=========================================="
+
+          echo "Data/ora: $TS"
+          echo "URL:     $IMG_URL"
+          echo "File:    $IMG_PATH"
+
+          echo "=========================================="
+
+
+          curl \
+            --location \
+            --fail \
+            --silent \
+            --show-error \
+            --retry 5 \
+            --retry-delay 5 \
+            --connect-timeout 20 \
+            --max-time 60 \
+            -o "$IMG_PATH" \
+            "$IMG_URL"
+
+
+          # ========================================================
+          # CONTROLLO FILE
+          # ========================================================
+
+          if [ ! -s "$IMG_PATH" ]; then
+
+            echo "ERRORE: immagine vuota."
+
+            exit 1
+
+          fi
+
+
+          FILE_TYPE=$(file -b "$IMG_PATH")
+
+          echo "Tipo file: $FILE_TYPE"
+
+
+          if ! echo "$FILE_TYPE" | grep -qiE 'JPEG|JPG'; then
+
+            echo "ERRORE: il file non sembra essere un JPEG."
+
+            exit 1
+
+          fi
+
+
+          IMG_SIZE=$(stat -c%s "$IMG_PATH")
+
+          echo "Dimensione: $IMG_SIZE byte"
+
+
+          IMG_SHA256=$(
+            sha256sum "$IMG_PATH" |
+            awk '{print $1}'
+          )
+
+
+          echo ""
+          echo "SHA256: $IMG_SHA256"
+
+
+          echo "IMG_PATH=$IMG_PATH" >> "$GITHUB_ENV"
+          echo "IMG_SHA256=$IMG_SHA256" >> "$GITHUB_ENV"
+
+
+      # ============================================================
+      # 6. ARCHIVIA IMMAGINE
+      # ============================================================
+
+      - name: Archivia immagine
+        id: archive
+        if: >
+          steps.sunlight.outputs.daylight == 'true' &&
+          steps.interval.outputs.download == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+
+          MAX_SIZE=$((80 * 1024 * 1024))
+
+
+          TODAY=$(date +"%Y-%m-%d")
+          MONTH=$(date +"%Y-%m")
+
+
+          RELEASE_TAG="webcam-${MONTH}"
+          RELEASE_TITLE="Webcam ${MONTH}"
+
+          BASE_NAME="webcam_${TODAY}"
+
+
+          echo "=========================================="
+          echo "ARCHIVIAZIONE"
+          echo "=========================================="
+
+          echo "Giorno:        $TODAY"
+          echo "Mese:          $MONTH"
+          echo "Release:       $RELEASE_TAG"
+          echo "Archivio base: $BASE_NAME"
+          echo "Limite ZIP:    80 MiB"
+
+          echo "=========================================="
+
+
+          # ========================================================
+          # CREA RELEASE MENSILE
+          # ========================================================
+
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+
+            echo "Release non esistente."
+            echo "Creo $RELEASE_TAG..."
+
+
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TITLE" \
+              --notes "Archivio webcam del mese ${MONTH}." \
+              --latest=false
+
+
+            echo "Release creata."
+
+          else
+
+            echo "Release già esistente."
+
+          fi
+
+
+          # ========================================================
+          # TROVA ULTIMO ZIP DEL GIORNO
+          # ========================================================
+
+          ASSETS_JSON=$(
+            gh release view "$RELEASE_TAG" \
+            --json assets
+          )
+
+
+          LAST_PART=$(
+            echo "$ASSETS_JSON" |
+            jq -r '.assets[].name' |
+            grep -E "^${BASE_NAME}_part[0-9]+\.zip$" |
+            sort -V |
+            tail -n 1 ||
+            true
+          )
+
+
+          if [ -z "$LAST_PART" ]; then
+
+            echo "Nessun archivio per oggi."
+
+          else
+
+            echo "Ultimo archivio: $LAST_PART"
+
+          fi
+
+
+          # ========================================================
+          # SE ESISTE ZIP, CONTROLLA DUPLICATO
+          # ========================================================
+
+          if [ -n "$LAST_PART" ]; then
+
+            mkdir -p current_archive
+
+
+            echo "Scarico $LAST_PART..."
+
+
+            gh release download "$RELEASE_TAG" \
+              --pattern "$LAST_PART" \
+              --dir current_archive \
+              --clobber
+
+
+            CURRENT_ZIP="current_archive/$LAST_PART"
+
+
+            # ======================================================
+            # TROVA ULTIMA IMMAGINE
+            # ======================================================
+
+            LAST_IMAGE=$(
+              unzip -Z1 "$CURRENT_ZIP" |
+              grep -Ei '\.jpg$' |
+              sort |
+              tail -n 1 ||
+              true
+            )
+
+
+            if [ -n "$LAST_IMAGE" ]; then
+
+              echo "Ultima immagine: $LAST_IMAGE"
+
+
+              OLD_SHA256=$(
+                unzip -p "$CURRENT_ZIP" "$LAST_IMAGE" |
+                sha256sum |
+                awk '{print $1}'
+              )
+
+
+              echo "SHA256 precedente: $OLD_SHA256"
+              echo "SHA256 attuale:    $IMG_SHA256"
+
+
+              # ====================================================
+              # DUPLICATO
+              # ====================================================
+
+              if [ "$OLD_SHA256" = "$IMG_SHA256" ]; then
+
+                echo ""
+                echo "=========================================="
+                echo "IMMAGINE DUPLICATA"
+                echo "=========================================="
+
+                echo "La webcam ha restituito la stessa immagine."
+                echo "Nessuna modifica alla Release."
+
+                rm -rf webcam current_archive
+
+                echo "archived=false" >> "$GITHUB_OUTPUT"
+
+                exit 0
+
+              fi
+
+            fi
+
+          fi
+
+
+          # ========================================================
+          # NESSUN ARCHIVIO -> PART1
+          # ========================================================
+
+          if [ -z "$LAST_PART" ]; then
+
+            ZIP_FILE="${BASE_NAME}_part1.zip"
+
+
+            echo ""
+            echo "Creo: $ZIP_FILE"
+
+
+            zip -9 -j "$ZIP_FILE" "$IMG_PATH"
+
+
+            SIZE=$(stat -c%s "$ZIP_FILE")
+
+
+            echo "Dimensione: $SIZE byte"
+
+
+            if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+
+              echo "ERRORE: immagine superiore a 80 MiB."
+
+              exit 1
+
+            fi
+
+
+            echo "Carico nella Release..."
+
+
+            gh release upload \
+              "$RELEASE_TAG" \
+              "$ZIP_FILE"
+
+
+            echo "Upload completato."
+
+
+            rm -rf webcam current_archive
+            rm -f "$ZIP_FILE"
+
+
+            echo "archived=true" >> "$GITHUB_OUTPUT"
+
+            exit 0
+
+          fi
+
+
+          # ========================================================
+          # PROVA AD AGGIUNGERE ALL'ULTIMO ZIP
+          # ========================================================
+
+          TEST_ZIP="test_${LAST_PART}"
+
+
+          cp "$CURRENT_ZIP" "$TEST_ZIP"
+
+
+          zip -9 -j "$TEST_ZIP" "$IMG_PATH" >/dev/null
+
+
+          TEST_SIZE=$(stat -c%s "$TEST_ZIP")
+
+
+          echo ""
+          echo "Dimensione dopo aggiunta:"
+          echo "$TEST_SIZE byte"
+
+
+          # ========================================================
+          # ZIP SOTTO 80 MiB
+          # ========================================================
+
+          if [ "$TEST_SIZE" -le "$MAX_SIZE" ]; then
+
+            echo ""
+            echo "Archivio sotto 80 MiB."
+            echo "Aggiorno $LAST_PART..."
+
+
+            gh release upload \
+              "$RELEASE_TAG" \
+              "$TEST_ZIP" \
+              --clobber
+
+
+            echo "Archivio aggiornato."
+
+
+            rm -rf webcam current_archive
+            rm -f "$TEST_ZIP"
+
+
+            echo "archived=true" >> "$GITHUB_OUTPUT"
+
+            exit 0
+
+          fi
+
+
+          # ========================================================
+          # ZIP OLTRE 80 MiB -> NUOVO PART
+          # ========================================================
+
+          CURRENT_PART=$(
+            echo "$LAST_PART" |
+            sed -E 's/.*_part([0-9]+)\.zip/\1/'
+          )
+
+
+          NEXT_PART=$((CURRENT_PART + 1))
+
+
+          NEW_ZIP="${BASE_NAME}_part${NEXT_PART}.zip"
+
+
+          echo ""
+          echo "=========================================="
+          echo "LIMITE 80 MiB RAGGIUNTO"
+          echo "=========================================="
+
+          echo "Creo: $NEW_ZIP"
+
+          echo "=========================================="
+
+
+          zip -9 -j "$NEW_ZIP" "$IMG_PATH"
+
+
+          NEW_SIZE=$(stat -c%s "$NEW_ZIP")
+
+
+          echo "Dimensione nuovo ZIP:"
+          echo "$NEW_SIZE byte"
+
+
+          if [ "$NEW_SIZE" -gt "$MAX_SIZE" ]; then
+
+            echo "ERRORE: singola immagine superiore a 80 MiB."
+
+            exit 1
+
+          fi
+
+
+          gh release upload \
+            "$RELEASE_TAG" \
+            "$NEW_ZIP"
+
+
+          echo ""
+          echo "=========================================="
+          echo "NUOVO ARCHIVIO CARICATO"
+          echo "$NEW_ZIP"
+          echo "=========================================="
+
+
+          # ========================================================
+          # PULIZIA
+          # ========================================================
+
+          rm -rf webcam current_archive
+          rm -f "$TEST_ZIP" "$NEW_ZIP"
+
+
+          echo "archived=true" >> "$GITHUB_OUTPUT"
+
+
+      # ============================================================
+      # 7. AGGIORNA LAST_CAPTURE.TXT
+      # ============================================================
+
+      - name: Aggiorna last_capture.txt
+        if: steps.archive.outputs.archived == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+
+          # Timestamp ISO 8601 con timezone esplicito
+          NOW=$(date --iso-8601=seconds)
+
+
+          echo "=========================================="
+          echo "AGGIORNAMENTO STATO"
+          echo "=========================================="
+
+          echo "Ultima acquisizione:"
+          echo "$NOW"
+
+          echo "=========================================="
+
+
+          printf '%s\n' "$NOW" > last_capture.txt
+
+
+          git config user.name \
+            "github-actions[bot]"
+
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+
+          git add last_capture.txt
+
+
+          if git diff --cached --quiet; then
+
+            echo "Nessuna modifica a last_capture.txt."
+
+          else
+
+            git commit \
+              -m "Update webcam capture timestamp"
+
+            git push
+
+          fi
