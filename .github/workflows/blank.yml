@@ -7,15 +7,21 @@ on:
 
   workflow_dispatch:
 
+# ============================================================
+# IMPORTANTE:
+# Non cancellare un run precedente se un nuovo run parte.
+# ============================================================
+
 concurrency:
   group: webcam-archive
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
   webcam:
+
     runs-on: ubuntu-latest
 
     env:
@@ -52,24 +58,32 @@ jobs:
           echo "=========================================="
 
           echo ""
-          echo "Ora UTC:"
+          echo "Data/ora UTC:"
           date -u "+%Y-%m-%d %H:%M:%S UTC"
 
           echo ""
-          echo "Ora Europe/Rome:"
+          echo "Data/ora Europe/Rome:"
           TZ=Europe/Rome date "+%Y-%m-%d %H:%M:%S %Z"
+
+          echo ""
+          echo "Timestamp Unix:"
+          date +%s
 
           echo ""
           echo "Tipo evento:"
           echo "${{ github.event_name }}"
 
           echo ""
-          echo "Schedule:"
-          echo "${{ github.event.schedule }}"
+          echo "Schedule ricevuto:"
+          echo "${{ github.event.schedule || 'NESSUNO - probabilmente esecuzione manuale' }}"
 
           echo ""
           echo "Run ID:"
           echo "${{ github.run_id }}"
+
+          echo ""
+          echo "Run Number:"
+          echo "${{ github.run_number }}"
 
           echo ""
           echo "Repository:"
@@ -83,58 +97,117 @@ jobs:
           echo "Commit:"
           echo "${{ github.sha }}"
 
+          echo ""
+          echo "Runner:"
+          echo "${{ runner.name }}"
+
+          echo ""
+          echo "Sistema operativo:"
+          uname -a
+
+          echo ""
+          echo "=========================================="
+          echo "FINE DIAGNOSTICA"
           echo "=========================================="
 
 
       # ============================================================
-      # 3. CALCOLO CREPUSCOLO CIVILE
+      # 3. SCRIVE DIAGNOSTICA NEL SUMMARY DI GITHUB
+      # ============================================================
+
+      - name: Summary esecuzione
+        shell: bash
+        run: |
+
+          EVENT="${{ github.event_name }}"
+          SCHEDULE="${{ github.event.schedule || 'manuale' }}"
+
+          echo "## 📷 Webcam Monte Caio" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "| Parametro | Valore |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Evento | $EVENT |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Schedule | $SCHEDULE |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| UTC | $(date -u '+%Y-%m-%d %H:%M:%S UTC') |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Europe/Rome | $(TZ=Europe/Rome date '+%Y-%m-%d %H:%M:%S %Z') |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Run ID | ${{ github.run_id }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Run Number | ${{ github.run_number }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+
+      # ============================================================
+      # 4. CALCOLO CREPUSCOLO CIVILE
       # ============================================================
 
       - name: Calcola finestra di acquisizione
         id: sunlight
         shell: bash
         run: |
+
           set -euo pipefail
 
           python3 <<'PY'
+
           import os
           import math
+
           from datetime import datetime, timezone
           from zoneinfo import ZoneInfo
+
 
           latitude = float(os.environ["LATITUDE"])
           longitude = float(os.environ["LONGITUDE"])
 
           local_tz = ZoneInfo("Europe/Rome")
+
           now = datetime.now(local_tz)
 
 
-          def solar_event(date, latitude, longitude, zenith, sunrise):
+          # ========================================================
+          # CALCOLO EVENTI SOLARI
+          # ========================================================
+
+          def solar_event(
+              date,
+              latitude,
+              longitude,
+              zenith,
+              sunrise
+          ):
 
               day_of_year = date.timetuple().tm_yday
 
               longitude_hour = longitude / 15.0
 
+
               if sunrise:
+
                   approximate_time = (
                       day_of_year
                       + ((6.0 - longitude_hour) / 24.0)
                   )
+
               else:
+
                   approximate_time = (
                       day_of_year
                       + ((18.0 - longitude_hour) / 24.0)
                   )
 
+
               mean_anomaly = (
                   0.9856 * approximate_time
               ) - 3.289
+
 
               sun_longitude = (
                   mean_anomaly
                   + (
                       1.916
-                      * math.sin(math.radians(mean_anomaly))
+                      * math.sin(
+                          math.radians(mean_anomaly)
+                      )
                   )
                   + (
                       0.020
@@ -145,7 +218,9 @@ jobs:
                   + 282.634
               )
 
+
               sun_longitude %= 360.0
+
 
               right_ascension = math.degrees(
                   math.atan(
@@ -156,24 +231,30 @@ jobs:
                   )
               )
 
+
               right_ascension %= 360.0
+
 
               longitude_quadrant = (
                   math.floor(sun_longitude / 90.0)
                   * 90.0
               )
 
+
               ra_quadrant = (
                   math.floor(right_ascension / 90.0)
                   * 90.0
               )
+
 
               right_ascension += (
                   longitude_quadrant
                   - ra_quadrant
               )
 
+
               right_ascension /= 15.0
+
 
               sin_declination = (
                   0.39782
@@ -182,20 +263,27 @@ jobs:
                   )
               )
 
+
               cos_declination = math.cos(
                   math.asin(sin_declination)
               )
+
 
               cos_hour_angle = (
                   math.cos(math.radians(zenith))
                   - (
                       sin_declination
-                      * math.sin(math.radians(latitude))
+                      * math.sin(
+                          math.radians(latitude)
+                      )
                   )
               ) / (
                   cos_declination
-                  * math.cos(math.radians(latitude))
+                  * math.cos(
+                      math.radians(latitude)
+                  )
               )
+
 
               if cos_hour_angle > 1.0:
                   return None
@@ -203,19 +291,25 @@ jobs:
               if cos_hour_angle < -1.0:
                   return None
 
+
               if sunrise:
+
                   hour_angle = (
                       360.0
                       - math.degrees(
                           math.acos(cos_hour_angle)
                       )
                   )
+
               else:
+
                   hour_angle = math.degrees(
                       math.acos(cos_hour_angle)
                   )
 
+
               hour_angle /= 15.0
+
 
               local_mean_time = (
                   hour_angle
@@ -224,10 +318,12 @@ jobs:
                   - 6.622
               )
 
+
               utc_hour = (
                   local_mean_time
                   - longitude_hour
               ) % 24.0
+
 
               hours = int(utc_hour)
 
@@ -244,15 +340,21 @@ jobs:
                   )
               )
 
+
               if seconds >= 60:
+
                   seconds = 0
                   minutes += 1
 
+
               if minutes >= 60:
+
                   minutes = 0
                   hours += 1
 
+
               hours %= 24
+
 
               return datetime(
                   date.year,
@@ -265,7 +367,12 @@ jobs:
               )
 
 
+          # ========================================================
+          # CREPUSCOLO CIVILE
+          # ========================================================
+
           CIVIL_ZENITH = 96.0
+
 
           civil_dawn_utc = solar_event(
               now.date(),
@@ -274,6 +381,7 @@ jobs:
               CIVIL_ZENITH,
               True
           )
+
 
           civil_dusk_utc = solar_event(
               now.date(),
@@ -299,18 +407,37 @@ jobs:
                   "a"
               ) as output:
 
-                  output.write("daylight=false\n")
+                  output.write(
+                      "daylight=false\n"
+                  )
 
               raise SystemExit(0)
 
 
-          civil_dawn = civil_dawn_utc.astimezone(local_tz)
-          civil_dusk = civil_dusk_utc.astimezone(local_tz)
+          civil_dawn = civil_dawn_utc.astimezone(
+              local_tz
+          )
+
+          civil_dusk = civil_dusk_utc.astimezone(
+              local_tz
+          )
 
 
-          print("==========================================")
-          print("CONTROLLO CREPUSCOLO CIVILE")
-          print("==========================================")
+          # ========================================================
+          # DIAGNOSTICA
+          # ========================================================
+
+          print(
+              "=========================================="
+          )
+
+          print(
+              "CONTROLLO CREPUSCOLO CIVILE"
+          )
+
+          print(
+              "=========================================="
+          )
 
           print(
               "Ora attuale:       "
@@ -321,16 +448,36 @@ jobs:
 
           print(
               "Inizio crepuscolo: "
-              + civil_dawn.strftime("%H:%M:%S")
+              + civil_dawn.strftime(
+                  "%Y-%m-%d %H:%M:%S %Z"
+              )
           )
 
           print(
               "Fine crepuscolo:   "
-              + civil_dusk.strftime("%H:%M:%S")
+              + civil_dusk.strftime(
+                  "%Y-%m-%d %H:%M:%S %Z"
+              )
           )
 
-          print("==========================================")
+          print(
+              "Latitude:          "
+              + str(latitude)
+          )
 
+          print(
+              "Longitude:         "
+              + str(longitude)
+          )
+
+          print(
+              "=========================================="
+          )
+
+
+          # ========================================================
+          # DETERMINA SE È GIORNO
+          # ========================================================
 
           if civil_dawn <= now <= civil_dusk:
 
@@ -343,7 +490,9 @@ jobs:
                   "a"
               ) as output:
 
-                  output.write("daylight=true\n")
+                  output.write(
+                      "daylight=true\n"
+                  )
 
           else:
 
@@ -357,36 +506,67 @@ jobs:
                   "a"
               ) as output:
 
-                  output.write("daylight=false\n")
+                  output.write(
+                      "daylight=false\n"
+                  )
 
           PY
 
 
       # ============================================================
-      # 4. SCARICA WEBCAM
+      # 5. AGGIORNA SUMMARY CON RISULTATO LUCE
+      # ============================================================
+
+      - name: Summary luce
+        shell: bash
+        run: |
+
+          if [ "${{ steps.sunlight.outputs.daylight }}" = "true" ]; then
+
+            echo "### ☀️ Finestra di acquisizione: ATTIVA" \
+              >> "$GITHUB_STEP_SUMMARY"
+
+          else
+
+            echo "### 🌙 Finestra di acquisizione: NON ATTIVA" \
+              >> "$GITHUB_STEP_SUMMARY"
+
+          fi
+
+
+      # ============================================================
+      # 6. SCARICA WEBCAM
       # ============================================================
 
       - name: Scarica immagine webcam
         if: steps.sunlight.outputs.daylight == 'true'
         shell: bash
         run: |
+
           set -euo pipefail
 
           mkdir -p webcam
 
+
           TS=$(date +"%Y-%m-%d_%H-%M-%S")
+
 
           IMG_URL="https://www.deltaeparapendio.it/utilities/img.php?img=1"
 
           IMG_PATH="webcam/webcam_${TS}.jpg"
 
+
           echo "=========================================="
           echo "DOWNLOAD WEBCAM"
           echo "=========================================="
 
+
           echo "Data/ora: $TS"
+
           echo "URL:     $IMG_URL"
+
           echo "File:    $IMG_PATH"
+
 
           echo "=========================================="
 
@@ -405,23 +585,31 @@ jobs:
 
 
           if [ ! -s "$IMG_PATH" ]; then
+
             echo "ERRORE: immagine vuota."
+
             exit 1
+
           fi
 
 
           FILE_TYPE=$(file -b "$IMG_PATH")
 
+
           echo "Tipo file: $FILE_TYPE"
 
 
           if ! echo "$FILE_TYPE" | grep -qiE 'JPEG|JPG'; then
+
             echo "ERRORE: il file non sembra essere un JPEG."
+
             exit 1
+
           fi
 
 
           IMG_SIZE=$(stat -c%s "$IMG_PATH")
+
 
           echo "Dimensione: $IMG_SIZE byte"
 
@@ -433,15 +621,17 @@ jobs:
 
 
           echo ""
+
           echo "SHA256: $IMG_SHA256"
 
 
           echo "IMG_PATH=$IMG_PATH" >> "$GITHUB_ENV"
+
           echo "IMG_SHA256=$IMG_SHA256" >> "$GITHUB_ENV"
 
 
       # ============================================================
-      # 5. ARCHIVIA IMMAGINE
+      # 7. ARCHIVIA IMMAGINE
       # ============================================================
 
       - name: Archivia immagine
@@ -449,41 +639,63 @@ jobs:
         if: steps.sunlight.outputs.daylight == 'true'
         shell: bash
         run: |
+
           set -euo pipefail
+
 
           MAX_SIZE=$((80 * 1024 * 1024))
 
+
           TODAY=$(date +"%Y-%m-%d")
+
           MONTH=$(date +"%Y-%m")
 
+
           RELEASE_TAG="webcam-${MONTH}"
+
           RELEASE_TITLE="Webcam ${MONTH}"
+
 
           BASE_NAME="webcam_${TODAY}"
 
 
           echo "=========================================="
+
           echo "ARCHIVIAZIONE"
+
           echo "=========================================="
+
 
           echo "Giorno:        $TODAY"
+
           echo "Mese:          $MONTH"
+
           echo "Release:       $RELEASE_TAG"
+
           echo "Archivio base: $BASE_NAME"
+
           echo "Limite ZIP:    80 MiB"
+
 
           echo "=========================================="
 
+
+          # ========================================================
+          # CREA RELEASE SE NON ESISTE
+          # ========================================================
 
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
 
             echo "Release non esistente."
+
             echo "Creo $RELEASE_TAG..."
+
 
             gh release create "$RELEASE_TAG" \
               --title "$RELEASE_TITLE" \
               --notes "Archivio webcam del mese ${MONTH}." \
               --latest=false
+
 
             echo "Release creata."
 
@@ -493,6 +705,10 @@ jobs:
 
           fi
 
+
+          # ========================================================
+          # ELENCO ASSET
+          # ========================================================
 
           ASSETS_JSON=$(
             gh release view "$RELEASE_TAG" \
@@ -511,9 +727,13 @@ jobs:
 
 
           if [ -z "$LAST_PART" ]; then
+
             echo "Nessun archivio per oggi."
+
           else
+
             echo "Ultimo archivio: $LAST_PART"
+
           fi
 
 
@@ -525,12 +745,15 @@ jobs:
 
             mkdir -p current_archive
 
+
             echo "Scarico $LAST_PART..."
+
 
             gh release download "$RELEASE_TAG" \
               --pattern "$LAST_PART" \
               --dir current_archive \
               --clobber
+
 
             CURRENT_ZIP="current_archive/$LAST_PART"
 
@@ -557,22 +780,34 @@ jobs:
 
 
               echo "SHA256 precedente: $OLD_SHA256"
+
               echo "SHA256 attuale:    $IMG_SHA256"
 
 
               if [ "$OLD_SHA256" = "$IMG_SHA256" ]; then
 
                 echo ""
-                echo "=========================================="
-                echo "IMMAGINE DUPLICATA"
+
                 echo "=========================================="
 
+                echo "IMMAGINE DUPLICATA"
+
+                echo "=========================================="
+
+
                 echo "La webcam ha restituito la stessa immagine."
+
                 echo "Nessuna modifica alla Release."
+
 
                 rm -rf webcam current_archive
 
+
                 echo "archived=false" >> "$GITHUB_OUTPUT"
+
+
+                echo "### ⚠️ Immagine duplicata" \
+                  >> "$GITHUB_STEP_SUMMARY"
 
                 exit 0
 
@@ -591,35 +826,52 @@ jobs:
 
             ZIP_FILE="${BASE_NAME}_part1.zip"
 
+
             echo ""
+
             echo "Creo: $ZIP_FILE"
+
 
             zip -9 -j "$ZIP_FILE" "$IMG_PATH"
 
+
             SIZE=$(stat -c%s "$ZIP_FILE")
+
 
             echo "Dimensione: $SIZE byte"
 
 
             if [ "$SIZE" -gt "$MAX_SIZE" ]; then
+
               echo "ERRORE: immagine superiore a 80 MiB."
+
               exit 1
+
             fi
 
 
             echo "Carico nella Release..."
 
+
             gh release upload \
               "$RELEASE_TAG" \
               "$ZIP_FILE"
+
 
             echo "Upload completato."
 
 
             rm -rf webcam current_archive
+
             rm -f "$ZIP_FILE"
 
+
             echo "archived=true" >> "$GITHUB_OUTPUT"
+
+
+            echo "### ✅ Immagine archiviata" \
+              >> "$GITHUB_STEP_SUMMARY"
+
 
             exit 0
 
@@ -632,22 +884,29 @@ jobs:
 
           TEST_ZIP="test_${LAST_PART}"
 
+
           cp "$CURRENT_ZIP" "$TEST_ZIP"
 
+
           zip -9 -j "$TEST_ZIP" "$IMG_PATH" >/dev/null
+
 
           TEST_SIZE=$(stat -c%s "$TEST_ZIP")
 
 
           echo ""
+
           echo "Dimensione dopo aggiunta:"
+
           echo "$TEST_SIZE byte"
 
 
           if [ "$TEST_SIZE" -le "$MAX_SIZE" ]; then
 
             echo ""
+
             echo "Archivio sotto 80 MiB."
+
             echo "Aggiorno $LAST_PART..."
 
 
@@ -661,9 +920,16 @@ jobs:
 
 
             rm -rf webcam current_archive
+
             rm -f "$TEST_ZIP"
 
+
             echo "archived=true" >> "$GITHUB_OUTPUT"
+
+
+            echo "### ✅ Immagine aggiunta all'archivio" \
+              >> "$GITHUB_STEP_SUMMARY"
+
 
             exit 0
 
@@ -679,32 +945,45 @@ jobs:
             sed -E 's/.*_part([0-9]+)\.zip/\1/'
           )
 
+
           NEXT_PART=$((CURRENT_PART + 1))
+
 
           NEW_ZIP="${BASE_NAME}_part${NEXT_PART}.zip"
 
 
           echo ""
-          echo "=========================================="
-          echo "LIMITE 80 MiB RAGGIUNTO"
+
           echo "=========================================="
 
+          echo "LIMITE 80 MiB RAGGIUNTO"
+
+          echo "=========================================="
+
+
           echo "Creo: $NEW_ZIP"
+
 
           echo "=========================================="
 
 
           zip -9 -j "$NEW_ZIP" "$IMG_PATH"
 
+
           NEW_SIZE=$(stat -c%s "$NEW_ZIP")
 
+
           echo "Dimensione nuovo ZIP:"
+
           echo "$NEW_SIZE byte"
 
 
           if [ "$NEW_SIZE" -gt "$MAX_SIZE" ]; then
+
             echo "ERRORE: singola immagine superiore a 80 MiB."
+
             exit 1
+
           fi
 
 
@@ -714,13 +993,23 @@ jobs:
 
 
           echo ""
+
           echo "=========================================="
+
           echo "NUOVO ARCHIVIO CARICATO"
+
           echo "$NEW_ZIP"
+
           echo "=========================================="
 
 
           rm -rf webcam current_archive
+
           rm -f "$TEST_ZIP" "$NEW_ZIP"
 
+
           echo "archived=true" >> "$GITHUB_OUTPUT"
+
+
+          echo "### ✅ Nuovo archivio creato" \
+            >> "$GITHUB_STEP_SUMMARY"
