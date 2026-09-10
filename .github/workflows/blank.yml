@@ -1,19 +1,15 @@
 name: Save Webcam Image MonteCaio
 
 on:
-  # Controllo ogni 5 minuti.
-  # Il controllo dei 28 minuti viene effettuato internamente.
-  # Evitiamo il minuto 00 per ridurre i possibili ritardi dello scheduler.
   schedule:
-    - cron: "2/5 * * * *"
+    - cron: "7,37 * * * *"
       timezone: "Europe/Rome"
 
-  # Avvio manuale
   workflow_dispatch:
 
 concurrency:
   group: webcam-archive
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -27,12 +23,8 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
 
-      # Monte Caio - Schia - Tizzano Val Parma
       LATITUDE: "44.4643"
       LONGITUDE: "10.1607"
-
-      # Intervallo minimo tra due immagini archiviate
-      INTERVAL_MINUTES: "28"
 
     steps:
 
@@ -273,9 +265,7 @@ jobs:
               )
 
 
-          # 96° = crepuscolo civile
           CIVIL_ZENITH = 96.0
-
 
           civil_dawn_utc = solar_event(
               now.date(),
@@ -373,173 +363,22 @@ jobs:
 
 
       # ============================================================
-      # 4. CONTROLLO INTERVALLO
-      # ============================================================
-
-      - name: Controlla intervallo ultima acquisizione
-        id: interval
-        if: steps.sunlight.outputs.daylight == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          STATE_FILE="last_capture.txt"
-          INTERVAL_SECONDS=$((INTERVAL_MINUTES * 60))
-
-          echo "=========================================="
-          echo "CONTROLLO ULTIMA ACQUISIZIONE"
-          echo "=========================================="
-
-          echo "Intervallo minimo:"
-          echo "${INTERVAL_MINUTES} minuti"
-
-
-          # ========================================================
-          # NESSUN FILE DI STATO
-          # ========================================================
-
-          if [ ! -f "$STATE_FILE" ]; then
-
-            echo ""
-            echo "File $STATE_FILE non esiste."
-            echo "Prima acquisizione consentita."
-
-            echo "download=true" >> "$GITHUB_OUTPUT"
-
-            exit 0
-
-          fi
-
-
-          # ========================================================
-          # LETTURA TIMESTAMP
-          # ========================================================
-
-          LAST_CAPTURE=$(
-            tr -d '\r\n' < "$STATE_FILE"
-          )
-
-
-          if [ -z "$LAST_CAPTURE" ]; then
-
-            echo ""
-            echo "File di stato vuoto."
-            echo "Prima acquisizione consentita."
-
-            echo "download=true" >> "$GITHUB_OUTPUT"
-
-            exit 0
-
-          fi
-
-
-          echo ""
-          echo "Ultima acquisizione:"
-          echo "$LAST_CAPTURE"
-
-
-          # ========================================================
-          # CONVERSIONE TIMESTAMP
-          # ========================================================
-
-          if ! LAST_EPOCH=$(
-            date -d "$LAST_CAPTURE" +%s 2>/dev/null
-          ); then
-
-            echo ""
-            echo "Timestamp non valido."
-            echo "Nuova acquisizione consentita."
-
-            echo "download=true" >> "$GITHUB_OUTPUT"
-
-            exit 0
-
-          fi
-
-
-          # ========================================================
-          # ORA ATTUALE
-          # ========================================================
-
-          NOW_EPOCH=$(date +%s)
-
-          ELAPSED=$((NOW_EPOCH - LAST_EPOCH))
-
-
-          echo ""
-          echo "Epoch ultima acquisizione:"
-          echo "$LAST_EPOCH"
-
-          echo "Epoch attuale:"
-          echo "$NOW_EPOCH"
-
-          echo "Secondi trascorsi:"
-          echo "$ELAPSED"
-
-          echo "Secondi richiesti:"
-          echo "$INTERVAL_SECONDS"
-
-
-          # ========================================================
-          # CONTROLLO INTERVALLO
-          # ========================================================
-
-          if [ "$ELAPSED" -lt "$INTERVAL_SECONDS" ]; then
-
-            REMAINING=$((INTERVAL_SECONDS - ELAPSED))
-            REMAINING_MIN=$((REMAINING / 60))
-
-            echo ""
-            echo "=========================================="
-            echo "TROPPO PRESTO"
-            echo "=========================================="
-
-            echo "Mancano circa:"
-            echo "${REMAINING_MIN} minuti."
-
-            echo "Nessuna acquisizione."
-
-            echo "download=false" >> "$GITHUB_OUTPUT"
-
-            exit 0
-
-          fi
-
-
-          echo ""
-          echo "=========================================="
-          echo "INTERVALLO OK"
-          echo "=========================================="
-
-          echo "Sono trascorsi almeno"
-          echo "${INTERVAL_MINUTES} minuti."
-
-          echo "Nuova acquisizione consentita."
-
-          echo "download=true" >> "$GITHUB_OUTPUT"
-
-
-      # ============================================================
-      # 5. SCARICA WEBCAM
+      # 4. SCARICA WEBCAM
       # ============================================================
 
       - name: Scarica immagine webcam
-        if: >
-          steps.sunlight.outputs.daylight == 'true' &&
-          steps.interval.outputs.download == 'true'
+        if: steps.sunlight.outputs.daylight == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p webcam
 
-
           TS=$(date +"%Y-%m-%d_%H-%M-%S")
 
           IMG_URL="https://www.deltaeparapendio.it/utilities/img.php?img=1"
 
           IMG_PATH="webcam/webcam_${TS}.jpg"
-
 
           echo "=========================================="
           echo "DOWNLOAD WEBCAM"
@@ -565,16 +404,9 @@ jobs:
             "$IMG_URL"
 
 
-          # ========================================================
-          # CONTROLLO FILE
-          # ========================================================
-
           if [ ! -s "$IMG_PATH" ]; then
-
             echo "ERRORE: immagine vuota."
-
             exit 1
-
           fi
 
 
@@ -584,11 +416,8 @@ jobs:
 
 
           if ! echo "$FILE_TYPE" | grep -qiE 'JPEG|JPG'; then
-
             echo "ERRORE: il file non sembra essere un JPEG."
-
             exit 1
-
           fi
 
 
@@ -612,25 +441,20 @@ jobs:
 
 
       # ============================================================
-      # 6. ARCHIVIA IMMAGINE
+      # 5. ARCHIVIA IMMAGINE
       # ============================================================
 
       - name: Archivia immagine
         id: archive
-        if: >
-          steps.sunlight.outputs.daylight == 'true' &&
-          steps.interval.outputs.download == 'true'
+        if: steps.sunlight.outputs.daylight == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
-
           MAX_SIZE=$((80 * 1024 * 1024))
-
 
           TODAY=$(date +"%Y-%m-%d")
           MONTH=$(date +"%Y-%m")
-
 
           RELEASE_TAG="webcam-${MONTH}"
           RELEASE_TITLE="Webcam ${MONTH}"
@@ -651,21 +475,15 @@ jobs:
           echo "=========================================="
 
 
-          # ========================================================
-          # CREA RELEASE MENSILE
-          # ========================================================
-
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
 
             echo "Release non esistente."
             echo "Creo $RELEASE_TAG..."
 
-
             gh release create "$RELEASE_TAG" \
               --title "$RELEASE_TITLE" \
               --notes "Archivio webcam del mese ${MONTH}." \
               --latest=false
-
 
             echo "Release creata."
 
@@ -675,10 +493,6 @@ jobs:
 
           fi
 
-
-          # ========================================================
-          # TROVA ULTIMO ZIP DEL GIORNO
-          # ========================================================
 
           ASSETS_JSON=$(
             gh release view "$RELEASE_TAG" \
@@ -697,40 +511,29 @@ jobs:
 
 
           if [ -z "$LAST_PART" ]; then
-
             echo "Nessun archivio per oggi."
-
           else
-
             echo "Ultimo archivio: $LAST_PART"
-
           fi
 
 
           # ========================================================
-          # SE ESISTE ZIP, CONTROLLA DUPLICATO
+          # CONTROLLO DUPLICATO
           # ========================================================
 
           if [ -n "$LAST_PART" ]; then
 
             mkdir -p current_archive
 
-
             echo "Scarico $LAST_PART..."
-
 
             gh release download "$RELEASE_TAG" \
               --pattern "$LAST_PART" \
               --dir current_archive \
               --clobber
 
-
             CURRENT_ZIP="current_archive/$LAST_PART"
 
-
-            # ======================================================
-            # TROVA ULTIMA IMMAGINE
-            # ======================================================
 
             LAST_IMAGE=$(
               unzip -Z1 "$CURRENT_ZIP" |
@@ -757,10 +560,6 @@ jobs:
               echo "SHA256 attuale:    $IMG_SHA256"
 
 
-              # ====================================================
-              # DUPLICATO
-              # ====================================================
-
               if [ "$OLD_SHA256" = "$IMG_SHA256" ]; then
 
                 echo ""
@@ -785,50 +584,40 @@ jobs:
 
 
           # ========================================================
-          # NESSUN ARCHIVIO -> PART1
+          # PRIMO ZIP DEL GIORNO
           # ========================================================
 
           if [ -z "$LAST_PART" ]; then
 
             ZIP_FILE="${BASE_NAME}_part1.zip"
 
-
             echo ""
             echo "Creo: $ZIP_FILE"
 
-
             zip -9 -j "$ZIP_FILE" "$IMG_PATH"
 
-
             SIZE=$(stat -c%s "$ZIP_FILE")
-
 
             echo "Dimensione: $SIZE byte"
 
 
             if [ "$SIZE" -gt "$MAX_SIZE" ]; then
-
               echo "ERRORE: immagine superiore a 80 MiB."
-
               exit 1
-
             fi
 
 
             echo "Carico nella Release..."
 
-
             gh release upload \
               "$RELEASE_TAG" \
               "$ZIP_FILE"
-
 
             echo "Upload completato."
 
 
             rm -rf webcam current_archive
             rm -f "$ZIP_FILE"
-
 
             echo "archived=true" >> "$GITHUB_OUTPUT"
 
@@ -843,12 +632,9 @@ jobs:
 
           TEST_ZIP="test_${LAST_PART}"
 
-
           cp "$CURRENT_ZIP" "$TEST_ZIP"
 
-
           zip -9 -j "$TEST_ZIP" "$IMG_PATH" >/dev/null
-
 
           TEST_SIZE=$(stat -c%s "$TEST_ZIP")
 
@@ -857,10 +643,6 @@ jobs:
           echo "Dimensione dopo aggiunta:"
           echo "$TEST_SIZE byte"
 
-
-          # ========================================================
-          # ZIP SOTTO 80 MiB
-          # ========================================================
 
           if [ "$TEST_SIZE" -le "$MAX_SIZE" ]; then
 
@@ -881,7 +663,6 @@ jobs:
             rm -rf webcam current_archive
             rm -f "$TEST_ZIP"
 
-
             echo "archived=true" >> "$GITHUB_OUTPUT"
 
             exit 0
@@ -890,7 +671,7 @@ jobs:
 
 
           # ========================================================
-          # ZIP OLTRE 80 MiB -> NUOVO PART
+          # NUOVO PART
           # ========================================================
 
           CURRENT_PART=$(
@@ -898,9 +679,7 @@ jobs:
             sed -E 's/.*_part([0-9]+)\.zip/\1/'
           )
 
-
           NEXT_PART=$((CURRENT_PART + 1))
-
 
           NEW_ZIP="${BASE_NAME}_part${NEXT_PART}.zip"
 
@@ -917,20 +696,15 @@ jobs:
 
           zip -9 -j "$NEW_ZIP" "$IMG_PATH"
 
-
           NEW_SIZE=$(stat -c%s "$NEW_ZIP")
-
 
           echo "Dimensione nuovo ZIP:"
           echo "$NEW_SIZE byte"
 
 
           if [ "$NEW_SIZE" -gt "$MAX_SIZE" ]; then
-
             echo "ERRORE: singola immagine superiore a 80 MiB."
-
             exit 1
-
           fi
 
 
@@ -946,64 +720,7 @@ jobs:
           echo "=========================================="
 
 
-          # ========================================================
-          # PULIZIA
-          # ========================================================
-
           rm -rf webcam current_archive
           rm -f "$TEST_ZIP" "$NEW_ZIP"
 
-
           echo "archived=true" >> "$GITHUB_OUTPUT"
-
-
-      # ============================================================
-      # 7. AGGIORNA LAST_CAPTURE.TXT
-      # ============================================================
-
-      - name: Aggiorna last_capture.txt
-        if: steps.archive.outputs.archived == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-
-          # Timestamp ISO 8601 con timezone esplicito
-          NOW=$(date --iso-8601=seconds)
-
-
-          echo "=========================================="
-          echo "AGGIORNAMENTO STATO"
-          echo "=========================================="
-
-          echo "Ultima acquisizione:"
-          echo "$NOW"
-
-          echo "=========================================="
-
-
-          printf '%s\n' "$NOW" > last_capture.txt
-
-
-          git config user.name \
-            "github-actions[bot]"
-
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
-
-
-          git add last_capture.txt
-
-
-          if git diff --cached --quiet; then
-
-            echo "Nessuna modifica a last_capture.txt."
-
-          else
-
-            git commit \
-              -m "Update webcam capture timestamp"
-
-            git push
-
-          fi
